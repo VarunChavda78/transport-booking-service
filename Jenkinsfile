@@ -109,20 +109,35 @@ pipeline {
 
         // Stage 5: Login to AWS ECR and push image
         stage('Push to ECR') {
-            agent {
-                docker {
-                    image 'amazon/aws-cli:latest'
-                    reuseNode true
-                    // Mount Docker socket so aws-cli container
-                    // can talk to Docker to push image
-                    args "-v /var/run/docker.sock:/var/run/docker.sock \
-                          --entrypoint="
-                }
-            }
             steps {
-                echo 'Running inside amazon/aws-cli container...'
-                echo 'Logging into AWS ECR...'
-                
+                echo 'Pushing to ECR...'
+                withCredentials([
+                    string(credentialsId: 'AWS_ACCESS_KEY_ID',
+                           variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'AWS_SECRET_ACCESS_KEY',
+                           variable: 'AWS_SECRET_ACCESS_KEY')
+                ]) {
+                    sh '''
+                        # Export AWS credentials
+                        export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+                        export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+                        export AWS_DEFAULT_REGION=ap-south-1
+
+                        # ECR Login
+                        aws ecr get-login-password \
+                            --region ap-south-1 | \
+                        docker login \
+                            --username AWS \
+                            --password-stdin \
+                            339712873091.dkr.ecr.ap-south-1.amazonaws.com
+
+                        # Push images
+                        docker push 339712873091.dkr.ecr.ap-south-1.amazonaws.com/transport-booking-service:latest
+                    '''
+                }
+
+                // Push build-tagged image separately
+                // Using double quotes for Groovy variable interpolation
                 withCredentials([
                     string(credentialsId: 'AWS_ACCESS_KEY_ID',
                            variable: 'AWS_ACCESS_KEY_ID'),
@@ -130,28 +145,13 @@ pipeline {
                            variable: 'AWS_SECRET_ACCESS_KEY')
                 ]) {
                     sh """
-                        # Set AWS credentials as environment variables
-                        # Safer than aws configure (no files written to disk)
-                        export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-                        export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+                        export AWS_ACCESS_KEY_ID=\$AWS_ACCESS_KEY_ID
+                        export AWS_SECRET_ACCESS_KEY=\$AWS_SECRET_ACCESS_KEY
                         export AWS_DEFAULT_REGION=${AWS_REGION}
 
-                        # Login to ECR
-                        # Gets temporary token and passes to docker login
-                        aws ecr get-login-password \
-                            --region ${AWS_REGION} | \
-                        docker login \
-                            --username AWS \
-                            --password-stdin ${ECR_REGISTRY}
-
-                        # Push image with build tag
-                        # Example: main-7, dev/v1.1-3
                         docker push ${ECR_REPO_URL}:${IMAGE_TAG}
 
-                        # Push latest tag
-                        docker push ${ECR_REPO_URL}:latest
-
-                        echo "Successfully pushed: ${ECR_REPO_URL}:${IMAGE_TAG}"
+                        echo "✅ Pushed: ${ECR_REPO_URL}:${IMAGE_TAG}"
                     """
                 }
             }
