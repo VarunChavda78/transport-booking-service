@@ -4,7 +4,7 @@ pipeline {
     // ── Environment Variables ─────────────────────
     environment {
         // Your AWS details
-        AWS_REGION          = 'ap-south-1'
+        AWS_REGION          = 'us-east-1'
         AWS_ACCOUNT_ID      = '339712873091'   // replace with your AWS account ID
         ECR_REPO_NAME       = 'transport-booking-service'
         
