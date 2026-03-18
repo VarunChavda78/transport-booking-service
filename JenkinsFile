@@ -26,35 +26,49 @@ pipeline {
         // Stage 1: Checkout code from GitHub
         stage('Checkout') {
             steps {
-                echo "Checking out branch: ${env.BRANCH_NAME}"
+                echo "Branch: ${env.BRANCH_NAME}"
+                echo "Build:  ${env.BUILD_NUMBER}"
+                echo "Image:  ${ECR_REPO_URL}:${IMAGE_TAG}"
                 checkout scm
             }
         }
 
         // Stage 2: Install dependencies and run tests
         stage('Install & Test') {
+            agent {
+                docker {
+                    image 'node:22-alpine'
+                    // reuseNode = use same workspace folder
+                    // so files are shared between stages
+                    reuseNode true
+                }
+            }
             steps {
-                echo 'Installing dependencies...'
+                echo 'Running inside node:22-alpine container...'
+                
+                // Verify node and npm are available
+                sh 'node --version'
+                sh 'npm --version'
+                
+                // Install dependencies
                 sh 'npm install'
                 
-                echo 'Running tests...'
+                // Run tests if you have them
                 // sh 'npm test'
-                // Commented out — add your tests later
                 
-                echo 'Tests passed!'
+                echo 'Install & Test complete!'
             }
         }
 
         // Stage 3: Build Docker image
         stage('Docker Build') {
             steps {
-                echo "Building Docker image: ${ECR_REPO_URL}:${IMAGE_TAG}"
+                echo "Building image: ${ECR_REPO_URL}:${IMAGE_TAG}"
                 
                 sh """
                     docker build \
                         --tag ${ECR_REPO_URL}:${IMAGE_TAG} \
                         --tag ${ECR_REPO_URL}:latest \
-                        --build-arg NODE_ENV=production \
                         .
                 """
                 
@@ -65,17 +79,29 @@ pipeline {
         // Stage 4: Security scan with Trivy
         // Scans image for vulnerabilities before pushing
         stage('Security Scan') {
+            agent {
+                docker {
+                    image 'aquasec/trivy:latest'
+                    reuseNode true
+                    // Override entrypoint so we can run
+                    // trivy commands manually
+                    args "--entrypoint= -v /var/run/docker.sock:/var/run/docker.sock"
+                }
+            }
             steps {
+                echo 'Running inside aquasec/trivy container...'
                 echo 'Scanning image for vulnerabilities...'
                 
                 sh """
                     trivy image \
                         --severity HIGH,CRITICAL \
                         --exit-code 0 \
+                        --no-progress \
+                        --format table \
                         ${ECR_REPO_URL}:${IMAGE_TAG}
                 """
-                // exit-code 0 means: report but don't fail pipeline
-                // change to exit-code 1 to BLOCK push if critical CVE found
+                // exit-code 0 = show vulnerabilities but don't fail
+                // exit-code 1 = fail pipeline if critical found
                 
                 echo 'Security scan complete!'
             }
@@ -83,48 +109,71 @@ pipeline {
 
         // Stage 5: Login to AWS ECR and push image
         stage('Push to ECR') {
+            agent {
+                docker {
+                    image 'amazon/aws-cli:latest'
+                    reuseNode true
+                    // Mount Docker socket so aws-cli container
+                    // can talk to Docker to push image
+                    args "-v /var/run/docker.sock:/var/run/docker.sock \
+                          --entrypoint="
+                }
+            }
             steps {
+                echo 'Running inside amazon/aws-cli container...'
                 echo 'Logging into AWS ECR...'
                 
                 withCredentials([
-                    string(credentialsId: 'AWS_ACCESS_KEY_ID', 
+                    string(credentialsId: 'AWS_ACCESS_KEY_ID',
                            variable: 'AWS_ACCESS_KEY_ID'),
-                    string(credentialsId: 'AWS_SECRET_ACCESS_KEY', 
+                    string(credentialsId: 'AWS_SECRET_ACCESS_KEY',
                            variable: 'AWS_SECRET_ACCESS_KEY')
                 ]) {
                     sh """
-                        // Configure AWS CLI
-                        aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
-                        aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
-                        aws configure set default.region ${AWS_REGION}
-                        
-                        // Login to ECR
+                        # Set AWS credentials as environment variables
+                        # Safer than aws configure (no files written to disk)
+                        export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+                        export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+                        export AWS_DEFAULT_REGION=${AWS_REGION}
+
+                        # Login to ECR
+                        # Gets temporary token and passes to docker login
                         aws ecr get-login-password \
                             --region ${AWS_REGION} | \
                         docker login \
                             --username AWS \
                             --password-stdin ${ECR_REGISTRY}
-                        
-                        // Push both tags
+
+                        # Push image with build tag
+                        # Example: main-7, dev/v1.1-3
                         docker push ${ECR_REPO_URL}:${IMAGE_TAG}
+
+                        # Push latest tag
                         docker push ${ECR_REPO_URL}:latest
-                        
-                        echo "Image pushed: ${ECR_REPO_URL}:${IMAGE_TAG}"
+
+                        echo "Successfully pushed: ${ECR_REPO_URL}:${IMAGE_TAG}"
                     """
                 }
             }
         }
-
         // Stage 6: Cleanup local Docker images
         // Saves disk space on Jenkins server
         stage('Cleanup') {
             steps {
                 echo 'Cleaning up local Docker images...'
+                
                 sh """
+                    # Remove tagged image
                     docker rmi ${ECR_REPO_URL}:${IMAGE_TAG} || true
+
+                    # Remove latest tag
                     docker rmi ${ECR_REPO_URL}:latest || true
+
+                    # Remove dangling images (untagged leftover layers)
+                    # docker image prune -f || true
                 """
-                echo 'Cleanup done!'
+                
+                echo 'Cleanup complete!'
             }
         }
     }
@@ -133,22 +182,27 @@ pipeline {
     post {
         success {
             echo """
-            ✅ SUCCESS!
-            Branch: ${env.BRANCH_NAME}
-            Image: ${ECR_REPO_URL}:${IMAGE_TAG}
-            Successfully pushed to ECR!
+            ✅ PIPELINE SUCCESS!
+            ─────────────────────────────
+            Branch : ${env.BRANCH_NAME}
+            Build  : ${env.BUILD_NUMBER}
+            Image  : ${ECR_REPO_URL}:${IMAGE_TAG}
+            ─────────────────────────────
+            Image is now available in AWS ECR!
             """
         }
         failure {
             echo """
             ❌ PIPELINE FAILED!
-            Branch: ${env.BRANCH_NAME}
-            Build: ${env.BUILD_NUMBER}
-            Check logs above for errors.
+            ─────────────────────────────
+            Branch : ${env.BRANCH_NAME}
+            Build  : ${env.BUILD_NUMBER}
+            ─────────────────────────────
+            Check the stage logs above!
             """
         }
         always {
-            // Clean workspace after build
+            // Clean Jenkins workspace
             cleanWs()
         }
     }
